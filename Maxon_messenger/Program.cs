@@ -292,7 +292,6 @@ namespace Maxon_messenger
         }
     }
 
-    //САМ НАПИСАЛ!!!
     class Message
     {
         public int Id;
