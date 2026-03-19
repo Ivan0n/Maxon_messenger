@@ -12,6 +12,7 @@ namespace Maxon_messenger
         private static HttpListener _listener;
         private const string Url = "http://localhost:2222/";
         private const string WebRoot = "web";
+        private const string ChatFile = "chat_history.txt";
 
         // Хранилище сообщений
         private static readonly List<Message> Messages = new List<Message>();
@@ -20,17 +21,88 @@ namespace Maxon_messenger
 
         static void Main(string[] args)
         {
+            // ===== Загрузка истории из файла =====
+            LoadHistory();
+
             _listener = new HttpListener();
             _listener.Prefixes.Add(Url);
             _listener.Start();
 
             Console.WriteLine($"Сервер запущен: {Url}");
             Console.WriteLine($"Корневая папка: {Path.GetFullPath(WebRoot)}");
+            Console.WriteLine($"Файл истории:   {Path.GetFullPath(ChatFile)}");
+            Console.WriteLine($"Загружено сообщений: {Messages.Count}");
 
             while (true)
             {
                 HttpListenerContext context = _listener.GetContext();
                 ThreadPool.QueueUserWorkItem(_ => HandleRequest(context));
+            }
+        }
+
+        // ========== Загрузка истории ==========
+        private static void LoadHistory()
+        {
+            if (!File.Exists(ChatFile))
+            {
+                Console.WriteLine("Файл истории не найден, начинаем с чистого чата.");
+                return;
+            }
+
+            try
+            {
+                string[] lines = File.ReadAllLines(ChatFile, Encoding.UTF8);
+
+                foreach (string line in lines)
+                {
+                    if (string.IsNullOrWhiteSpace(line))
+                        continue;
+
+                    // Формат: ID|User|Time|Text
+                    // Text может содержать |, поэтому делим максимум на 4 части
+                    string[] parts = line.Split(new[] { '|' }, 4);
+
+                    if (parts.Length < 4)
+                        continue;
+
+                    int id;
+                    if (!int.TryParse(parts[0], out id))
+                        continue;
+
+                    Messages.Add(new Message
+                    {
+                        Id = id,
+                        User = parts[1],
+                        Time = parts[2],
+                        Text = parts[3].Replace("\\n", "\n")  // восстанавливаем переносы
+                    });
+
+                    if (id >= _nextId)
+                        _nextId = id + 1;
+                }
+
+                Console.WriteLine($"Загружено {Messages.Count} сообщений из {ChatFile}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка загрузки истории: {ex.Message}");
+            }
+        }
+
+        // ========== Сохранение одного сообщения в файл ==========
+        private static void SaveMessageToFile(Message msg)
+        {
+            try
+            {
+                // Заменяем переносы строк, чтобы не ломать формат
+                string safeText = msg.Text.Replace("\n", "\\n").Replace("\r", "");
+                string line = $"{msg.Id}|{msg.User}|{msg.Time}|{safeText}";
+
+                File.AppendAllText(ChatFile, line + Environment.NewLine, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка сохранения: {ex.Message}");
             }
         }
 
@@ -44,20 +116,18 @@ namespace Maxon_messenger
 
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {request.HttpMethod} {path}");
 
-                // ===== API: отправить сообщение =====
                 if (path == "/api/send" && request.HttpMethod == "POST")
                 {
                     HandleSend(request, response);
                     return;
                 }
 
-                // ===== API: получить сообщения =====
                 if (path == "/api/messages" && request.HttpMethod == "GET")
                 {
                     HandleGetMessages(request, response);
                     return;
                 }
-                
+
                 if (path == "/")
                     path = "/index.html";
 
@@ -102,13 +172,16 @@ namespace Maxon_messenger
             {
                 lock (Lock)
                 {
-                    Messages.Add(new Message
+                    var msg = new Message
                     {
                         Id = _nextId++,
                         User = user,
                         Text = text,
                         Time = DateTime.Now.ToString("HH:mm")
-                    });
+                    };
+
+                    Messages.Add(msg);
+                    SaveMessageToFile(msg);   // <--- сохраняем в файл
 
                     Console.WriteLine($"  💬 {user}: {text}");
                 }
@@ -117,7 +190,7 @@ namespace Maxon_messenger
             SendJson(response, "{\"ok\":true}");
         }
 
-        //Отдача сообщений
+        // Отдача сообщений
         private static void HandleGetMessages(HttpListenerRequest request, HttpListenerResponse response)
         {
             string afterStr = request.QueryString["after"];
@@ -151,24 +224,17 @@ namespace Maxon_messenger
             SendJson(response, sb.ToString());
         }
 
-        //Вспомогательные
-
         private static void SendJson(HttpListenerResponse response, string json)
         {
             byte[] data = Encoding.UTF8.GetBytes(json);
             response.ContentType = "application/json; charset=utf-8";
             response.StatusCode = 200;
             response.ContentLength64 = data.Length;
-            // запрет кеширования
             response.AddHeader("Cache-Control", "no-cache");
             using (Stream output = response.OutputStream)
                 output.Write(data, 0, data.Length);
         }
 
-        /// <summary>
-        /// Простейший парсер значения строки из JSON без библиотек.
-        /// Ищет "key":"value" и возвращает value.
-        /// </summary>
         private static string ExtractJsonValue(string json, string key)
         {
             string pattern = "\"" + key + "\"";
@@ -181,7 +247,6 @@ namespace Maxon_messenger
             int qStart = json.IndexOf('"', colon + 1);
             if (qStart < 0) return null;
 
-            // ищем закрывающую кавычку, пропуская экранированные
             int qEnd = qStart + 1;
             while (qEnd < json.Length)
             {
