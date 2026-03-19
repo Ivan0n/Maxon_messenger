@@ -13,15 +13,21 @@ namespace Maxon_messenger
         private const string Url = "http://localhost:2222/";
         private const string WebRoot = "web";
         private const string ChatFile = "chat_history.txt";
+        private const string UploadsDir = "web/uploads";
+        private const long MaxUploadBytes = 10 * 1024 * 1024; // 10 МБ
 
-        // Хранилище сообщений
         private static readonly List<Message> Messages = new List<Message>();
         private static int _nextId = 1;
         private static readonly object Lock = new object();
 
         static void Main(string[] args)
         {
-            // ===== Загрузка истории из файла =====
+            if (!Directory.Exists(WebRoot))
+                Directory.CreateDirectory(WebRoot);
+
+            if (!Directory.Exists(UploadsDir))
+                Directory.CreateDirectory(UploadsDir);
+
             LoadHistory();
 
             _listener = new HttpListener();
@@ -29,8 +35,9 @@ namespace Maxon_messenger
             _listener.Start();
 
             Console.WriteLine($"Сервер запущен: {Url}");
-            Console.WriteLine($"Корневая папка: {Path.GetFullPath(WebRoot)}");
-            Console.WriteLine($"Файл истории:   {Path.GetFullPath(ChatFile)}");
+            Console.WriteLine($"Корневая папка:  {Path.GetFullPath(WebRoot)}");
+            Console.WriteLine($"Папка загрузок:  {Path.GetFullPath(UploadsDir)}");
+            Console.WriteLine($"Файл истории:    {Path.GetFullPath(ChatFile)}");
             Console.WriteLine($"Загружено сообщений: {Messages.Count}");
 
             while (true)
@@ -52,16 +59,12 @@ namespace Maxon_messenger
             try
             {
                 string[] lines = File.ReadAllLines(ChatFile, Encoding.UTF8);
-
                 foreach (string line in lines)
                 {
                     if (string.IsNullOrWhiteSpace(line))
                         continue;
 
-                    // Формат: ID|User|Time|Text
-                    // Text может содержать |, поэтому делим максимум на 4 части
                     string[] parts = line.Split(new[] { '|' }, 4);
-
                     if (parts.Length < 4)
                         continue;
 
@@ -74,7 +77,7 @@ namespace Maxon_messenger
                         Id = id,
                         User = parts[1],
                         Time = parts[2],
-                        Text = parts[3].Replace("\\n", "\n")  // восстанавливаем переносы
+                        Text = parts[3].Replace("\\n", "\n")
                     });
 
                     if (id >= _nextId)
@@ -89,15 +92,13 @@ namespace Maxon_messenger
             }
         }
 
-        // ========== Сохранение одного сообщения в файл ==========
+        // ========== Сохранение сообщения ==========
         private static void SaveMessageToFile(Message msg)
         {
             try
             {
-                // Заменяем переносы строк, чтобы не ломать формат
                 string safeText = msg.Text.Replace("\n", "\\n").Replace("\r", "");
                 string line = $"{msg.Id}|{msg.User}|{msg.Time}|{safeText}";
-
                 File.AppendAllText(ChatFile, line + Environment.NewLine, Encoding.UTF8);
             }
             catch (Exception ex)
@@ -106,6 +107,7 @@ namespace Maxon_messenger
             }
         }
 
+        // ========== Маршрутизация ==========
         private static void HandleRequest(HttpListenerContext context)
         {
             try
@@ -116,18 +118,28 @@ namespace Maxon_messenger
 
                 Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {request.HttpMethod} {path}");
 
+                // API: отправить сообщение
                 if (path == "/api/send" && request.HttpMethod == "POST")
                 {
                     HandleSend(request, response);
                     return;
                 }
 
+                // API: получить сообщения
                 if (path == "/api/messages" && request.HttpMethod == "GET")
                 {
                     HandleGetMessages(request, response);
                     return;
                 }
 
+                // API: загрузить картинку
+                if (path == "/api/upload" && request.HttpMethod == "POST")
+                {
+                    HandleUpload(request, response);
+                    return;
+                }
+
+                // Статические файлы
                 if (path == "/")
                     path = "/index.html";
 
@@ -144,7 +156,7 @@ namespace Maxon_messenger
                 }
                 else
                 {
-                    byte[] err = Encoding.UTF8.GetBytes("<h1>404 — Файл не найден</h1>");
+                    byte[] err = Encoding.UTF8.GetBytes("<h1>404</h1>");
                     response.ContentType = "text/html; charset=utf-8";
                     response.StatusCode = 404;
                     response.ContentLength64 = err.Length;
@@ -158,7 +170,7 @@ namespace Maxon_messenger
             }
         }
 
-        // Приём сообщения
+        // ========== Приём сообщения ==========
         private static void HandleSend(HttpListenerRequest request, HttpListenerResponse response)
         {
             string body;
@@ -181,16 +193,85 @@ namespace Maxon_messenger
                     };
 
                     Messages.Add(msg);
-                    SaveMessageToFile(msg);   // <--- сохраняем в файл
+                    SaveMessageToFile(msg);
 
-                    Console.WriteLine($"  💬 {user}: {text}");
+                    if (text.StartsWith("[IMG]"))
+                        Console.WriteLine($"  🖼 {user}: (картинка)");
+                    else
+                        Console.WriteLine($"  💬 {user}: {text}");
                 }
             }
 
             SendJson(response, "{\"ok\":true}");
         }
 
-        // Отдача сообщений
+        // ========== Загрузка картинки ==========
+        private static void HandleUpload(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            try
+            {
+                // Проверка размера
+                if (request.ContentLength64 > MaxUploadBytes)
+                {
+                    SendJson(response, "{\"error\":\"Файл слишком большой (макс. 10 МБ)\"}");
+                    return;
+                }
+
+                string body;
+                using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
+                    body = reader.ReadToEnd();
+
+                string name = ExtractJsonValue(body, "name");
+                string data = ExtractJsonValue(body, "data");
+
+                if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(data))
+                {
+                    SendJson(response, "{\"error\":\"Нет данных\"}");
+                    return;
+                }
+
+                // Проверка расширения
+                string ext = Path.GetExtension(name).ToLower();
+                if (ext != ".jpg" && ext != ".jpeg" && ext != ".png" &&
+                    ext != ".gif" && ext != ".webp" && ext != ".bmp")
+                {
+                    SendJson(response, "{\"error\":\"Недопустимый формат. Разрешены: jpg, png, gif, webp, bmp\"}");
+                    return;
+                }
+
+                // Декодируем Base64
+                byte[] fileBytes;
+                try
+                {
+                    fileBytes = Convert.FromBase64String(data);
+                }
+                catch
+                {
+                    SendJson(response, "{\"error\":\"Ошибка декодирования\"}");
+                    return;
+                }
+
+                // Генерируем уникальное имя
+                string fileName = Guid.NewGuid().ToString("N") + ext;
+                string filePath = Path.Combine(UploadsDir, fileName);
+
+                // Сохраняем файл
+                File.WriteAllBytes(filePath, fileBytes);
+
+                string url = "/uploads/" + fileName;
+
+                Console.WriteLine($"  📁 Загружен: {fileName} ({fileBytes.Length} байт)");
+
+                SendJson(response, "{\"url\":\"" + url + "\"}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  Ошибка загрузки: {ex.Message}");
+                SendJson(response, "{\"error\":\"Ошибка сервера\"}");
+            }
+        }
+
+        // ========== Отдача сообщений ==========
         private static void HandleGetMessages(HttpListenerRequest request, HttpListenerResponse response)
         {
             string afterStr = request.QueryString["after"];
@@ -223,6 +304,8 @@ namespace Maxon_messenger
             sb.Append("]");
             SendJson(response, sb.ToString());
         }
+
+        // ========== Утилиты ==========
 
         private static void SendJson(HttpListenerResponse response, string json)
         {
@@ -284,6 +367,8 @@ namespace Maxon_messenger
                 case ".jpg":  return "image/jpeg";
                 case ".jpeg": return "image/jpeg";
                 case ".gif":  return "image/gif";
+                case ".webp": return "image/webp";
+                case ".bmp":  return "image/bmp";
                 case ".svg":  return "image/svg+xml";
                 case ".ico":  return "image/x-icon";
                 case ".json": return "application/json";
