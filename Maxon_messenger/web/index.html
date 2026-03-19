@@ -21,11 +21,57 @@
             align-items: center;
         }
 
+        /* ===== Экран ввода имени ===== */
+        .login-screen {
+            text-align: center;
+        }
+
+        .login-screen h2 {
+            margin-bottom: 20px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+        }
+
+        .login-screen input {
+            padding: 12px 16px;
+            background: transparent;
+            border: 2px solid #fff;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            outline: none;
+            text-align: center;
+            width: 250px;
+        }
+
+        .login-screen input::placeholder {
+            color: #555;
+        }
+
+        .login-screen button {
+            display: block;
+            margin: 16px auto 0;
+            padding: 12px 32px;
+            background: #fff;
+            color: #000;
+            border: none;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        .login-screen button:hover {
+            background: #ccc;
+        }
+
+        /* ===== Чат ===== */
         .chat-container {
             width: 420px;
             height: 600px;
             border: 2px solid #fff;
-            display: flex;
+            display: none;          /* скрыт до входа */
             flex-direction: column;
         }
 
@@ -36,6 +82,12 @@
             text-transform: uppercase;
             letter-spacing: 4px;
             text-align: center;
+        }
+
+        .chat-header .online {
+            font-size: 11px;
+            opacity: 0.5;
+            letter-spacing: 1px;
         }
 
         .chat-messages {
@@ -54,60 +106,69 @@
             line-height: 1.4;
         }
 
-            .message.incoming {
-                align-self: flex-start;
-                border: 1px solid #fff;
-            }
+        .message.incoming {
+            align-self: flex-start;
+            border: 1px solid #fff;
+        }
 
-            .message.outgoing {
-                align-self: flex-end;
-                background: #fff;
-                color: #000;
-            }
+        .message.outgoing {
+            align-self: flex-end;
+            background: #fff;
+            color: #000;
+        }
 
-            .message .time {
-                font-size: 10px;
-                margin-top: 6px;
-                opacity: 0.5;
-                text-align: right;
-            }
+        .message .author {
+            font-size: 11px;
+            font-weight: bold;
+            margin-bottom: 4px;
+            opacity: 0.6;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .message .time {
+            font-size: 10px;
+            margin-top: 6px;
+            opacity: 0.5;
+            text-align: right;
+        }
 
         .chat-input {
             border-top: 2px solid #fff;
             display: flex;
         }
 
-            .chat-input input {
-                flex: 1;
-                padding: 14px 16px;
-                background: transparent;
-                border: none;
-                outline: none;
-                color: #fff;
-                font-family: 'Courier New', monospace;
-                font-size: 14px;
-            }
+        .chat-input input {
+            flex: 1;
+            padding: 14px 16px;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+        }
 
-                .chat-input input::placeholder {
-                    color: #555;
-                }
+        .chat-input input::placeholder {
+            color: #555;
+        }
 
-            .chat-input button {
-                padding: 14px 20px;
-                background: #fff;
-                color: #000;
-                border: none;
-                font-family: 'Courier New', monospace;
-                font-size: 14px;
-                cursor: pointer;
-                text-transform: uppercase;
-                letter-spacing: 2px;
-                transition: background 0.2s;
-            }
+        .chat-input button {
+            padding: 14px 20px;
+            background: #fff;
+            color: #000;
+            border: none;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            transition: background 0.2s;
+        }
 
-                .chat-input button:hover {
-                    background: #ccc;
-                }
+        .chat-input button:hover {
+            background: #ccc;
+        }
 
         .chat-messages::-webkit-scrollbar {
             width: 4px;
@@ -124,27 +185,20 @@
 </head>
 <body>
 
-    <div class="chat-container">
-        <div class="chat-header">чат</div>
+    <!-- Экран входа -->
+    <div class="login-screen" id="loginScreen">
+        <h2>введи имя</h2>
+        <input type="text" id="nameInput" placeholder="имя..." maxlength="20" autocomplete="off">
+        <button id="joinBtn">войти</button>
+    </div>
 
-        <div class="chat-messages" id="messages">
-            <div class="message incoming">
-                привет, как дела?
-                <div class="time">12:01</div>
-            </div>
-            <div class="message outgoing">
-                норм, а у тебя?
-                <div class="time">12:02</div>
-            </div>
-            <div class="message incoming">
-                тоже ничего, чё делаешь
-                <div class="time">12:02</div>
-            </div>
-            <div class="message outgoing">
-                заглушку пилю
-                <div class="time">12:03</div>
-            </div>
+    <!-- Чат -->
+    <div class="chat-container" id="chatContainer">
+        <div class="chat-header">
+            чат
         </div>
+
+        <div class="chat-messages" id="messages"></div>
 
         <div class="chat-input">
             <input type="text" id="input" placeholder="напиши что-нибудь..." autocomplete="off">
@@ -152,7 +206,107 @@
         </div>
     </div>
 
+    <script>
+        // ===== Переменные =====
+        let myName = '';
+        let lastId = 0;                    // ID последнего полученного сообщения
+        let pollTimer = null;
 
+        const loginScreen   = document.getElementById('loginScreen');
+        const chatContainer  = document.getElementById('chatContainer');
+        const nameInput      = document.getElementById('nameInput');
+        const joinBtn        = document.getElementById('joinBtn');
+        const messagesDiv    = document.getElementById('messages');
+        const input          = document.getElementById('input');
+        const sendBtn        = document.getElementById('send');
+
+        // ===== Вход =====
+        joinBtn.addEventListener('click', enterChat);
+        nameInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter') enterChat();
+        });
+
+        function enterChat() {
+            const name = nameInput.value.trim();
+            if (!name) return;
+            myName = name;
+            loginScreen.style.display = 'none';
+            chatContainer.style.display = 'flex';
+            input.focus();
+            // Запускаем опрос сервера
+            poll();
+            pollTimer = setInterval(poll, 1000);
+        }
+
+        // ===== Отправка =====
+        sendBtn.addEventListener('click', sendMessage);
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter') sendMessage();
+        });
+
+        function sendMessage() {
+            const text = input.value.trim();
+            if (!text) return;
+            input.value = '';
+
+            const body = JSON.stringify({ user: myName, text: text });
+
+            fetch('/api/send', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body
+            }).then(() => {
+                // Сразу опрашиваем, чтобы увидеть своё сообщение
+                poll();
+            }).catch(err => console.error('Ошибка отправки:', err));
+        }
+
+        // ===== Опрос новых сообщений =====
+        function poll() {
+            fetch('/api/messages?after=' + lastId)
+                .then(r => r.json())
+                .then(msgs => {
+                    if (msgs.length === 0) return;
+
+                    msgs.forEach(msg => {
+                        appendMessage(msg);
+                        if (msg.id > lastId) lastId = msg.id;
+                    });
+
+                    // Прокрутка вниз
+                    messagesDiv.scrollTop = messagesDiv.scrollHeight;
+                })
+                .catch(err => console.error('Ошибка опроса:', err));
+        }
+
+        // ===== Отрисовка сообщения =====
+        function appendMessage(msg) {
+            const isMe = (msg.user === myName);
+
+            const div = document.createElement('div');
+            div.className = 'message ' + (isMe ? 'outgoing' : 'incoming');
+
+            // Автор (только для чужих)
+            if (!isMe) {
+                const authorEl = document.createElement('div');
+                authorEl.className = 'author';
+                authorEl.textContent = msg.user;
+                div.appendChild(authorEl);
+            }
+
+            // Текст
+            const textNode = document.createTextNode(msg.text);
+            div.appendChild(textNode);
+
+            // Время
+            const timeEl = document.createElement('div');
+            timeEl.className = 'time';
+            timeEl.textContent = msg.time;
+            div.appendChild(timeEl);
+
+            messagesDiv.appendChild(div);
+        }
+    </script>
 
 </body>
 </html>

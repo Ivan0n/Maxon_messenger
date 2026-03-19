@@ -1,15 +1,22 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Threading;
 
 namespace Maxon_messenger
 {
     internal class Program
     {
         private static HttpListener _listener;
-        private const string Url = "http://localhost:8080/";
-        private const string WebRoot = "web"; // папка с файлами
+        private const string Url = "http://localhost:2222/";
+        private const string WebRoot = "web";
+
+        // Хранилище сообщений
+        private static readonly List<Message> Messages = new List<Message>();
+        private static int _nextId = 1;
+        private static readonly object Lock = new object();
 
         static void Main(string[] args)
         {
@@ -19,63 +26,187 @@ namespace Maxon_messenger
 
             Console.WriteLine($"Сервер запущен: {Url}");
             Console.WriteLine($"Корневая папка: {Path.GetFullPath(WebRoot)}");
-            Console.WriteLine("Нажмите Ctrl+C для остановки.\n");
 
             while (true)
             {
                 HttpListenerContext context = _listener.GetContext();
-                HandleRequest(context);
+                ThreadPool.QueueUserWorkItem(_ => HandleRequest(context));
             }
         }
 
         private static void HandleRequest(HttpListenerContext context)
         {
-            HttpListenerRequest request = context.Request;
-            HttpListenerResponse response = context.Response;
-
-            string path = request.Url.AbsolutePath;
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {request.HttpMethod} {path}");
-
-            // Если запрос "/" — отдаём index.html
-            if (path == "/")
-                path = "/index.html";
-
-            // Собираем путь к файлу: web/index.html, web/style.css и т.д.
-            string filePath = Path.Combine(WebRoot, path.TrimStart('/'));
-
-            if (File.Exists(filePath))
+            try
             {
-                byte[] fileBytes = File.ReadAllBytes(filePath);
-                response.ContentType = GetContentType(filePath);
-                response.ContentLength64 = fileBytes.Length;
-                response.StatusCode = (int)HttpStatusCode.OK;
+                HttpListenerRequest request = context.Request;
+                HttpListenerResponse response = context.Response;
+                string path = request.Url.AbsolutePath;
 
-                using (Stream output = response.OutputStream)
+                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {request.HttpMethod} {path}");
+
+                // ===== API: отправить сообщение =====
+                if (path == "/api/send" && request.HttpMethod == "POST")
                 {
-                    output.Write(fileBytes, 0, fileBytes.Length);
+                    HandleSend(request, response);
+                    return;
                 }
 
-                Console.WriteLine($"  → 200 OK | {filePath} ({fileBytes.Length} байт)");
+                // ===== API: получить сообщения =====
+                if (path == "/api/messages" && request.HttpMethod == "GET")
+                {
+                    HandleGetMessages(request, response);
+                    return;
+                }
+                
+                if (path == "/")
+                    path = "/index.html";
+
+                string filePath = Path.Combine(WebRoot, path.TrimStart('/'));
+
+                if (File.Exists(filePath))
+                {
+                    byte[] fileBytes = File.ReadAllBytes(filePath);
+                    response.ContentType = GetContentType(filePath);
+                    response.ContentLength64 = fileBytes.Length;
+                    response.StatusCode = 200;
+                    using (Stream output = response.OutputStream)
+                        output.Write(fileBytes, 0, fileBytes.Length);
+                }
+                else
+                {
+                    byte[] err = Encoding.UTF8.GetBytes("<h1>404 — Файл не найден</h1>");
+                    response.ContentType = "text/html; charset=utf-8";
+                    response.StatusCode = 404;
+                    response.ContentLength64 = err.Length;
+                    using (Stream output = response.OutputStream)
+                        output.Write(err, 0, err.Length);
+                }
             }
-            else
+            catch (Exception ex)
             {
-                // Файл не найден — 404
-                string errorHtml = "<h1>404 — Файл не найден</h1>";
-                byte[] errorBytes = Encoding.UTF8.GetBytes(errorHtml);
-                response.ContentType = "text/html; charset=utf-8";
-                response.ContentLength64 = errorBytes.Length;
-                response.StatusCode = (int)HttpStatusCode.NotFound;
-
-                using (Stream output = response.OutputStream)
-                {
-                    output.Write(errorBytes, 0, errorBytes.Length);
-                }
-
-                Console.WriteLine($"  → 404 Not Found | {filePath}");
+                Console.WriteLine($"  Ошибка: {ex.Message}");
             }
         }
 
-        // Определяем Content-Type по расширению файла
+        // Приём сообщения
+        private static void HandleSend(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            string body;
+            using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
+                body = reader.ReadToEnd();
+
+            string user = ExtractJsonValue(body, "user");
+            string text = ExtractJsonValue(body, "text");
+
+            if (!string.IsNullOrEmpty(text) && !string.IsNullOrEmpty(user))
+            {
+                lock (Lock)
+                {
+                    Messages.Add(new Message
+                    {
+                        Id = _nextId++,
+                        User = user,
+                        Text = text,
+                        Time = DateTime.Now.ToString("HH:mm")
+                    });
+
+                    Console.WriteLine($"  💬 {user}: {text}");
+                }
+            }
+
+            SendJson(response, "{\"ok\":true}");
+        }
+
+        //Отдача сообщений
+        private static void HandleGetMessages(HttpListenerRequest request, HttpListenerResponse response)
+        {
+            string afterStr = request.QueryString["after"];
+            int after = 0;
+            if (!string.IsNullOrEmpty(afterStr))
+                int.TryParse(afterStr, out after);
+
+            var sb = new StringBuilder();
+            sb.Append("[");
+
+            lock (Lock)
+            {
+                bool first = true;
+                for (int i = 0; i < Messages.Count; i++)
+                {
+                    Message msg = Messages[i];
+                    if (msg.Id <= after) continue;
+
+                    if (!first) sb.Append(",");
+                    sb.Append("{");
+                    sb.AppendFormat("\"id\":{0},", msg.Id);
+                    sb.AppendFormat("\"user\":\"{0}\",", EscapeJson(msg.User));
+                    sb.AppendFormat("\"text\":\"{0}\",", EscapeJson(msg.Text));
+                    sb.AppendFormat("\"time\":\"{0}\"", msg.Time);
+                    sb.Append("}");
+                    first = false;
+                }
+            }
+
+            sb.Append("]");
+            SendJson(response, sb.ToString());
+        }
+
+        //Вспомогательные
+
+        private static void SendJson(HttpListenerResponse response, string json)
+        {
+            byte[] data = Encoding.UTF8.GetBytes(json);
+            response.ContentType = "application/json; charset=utf-8";
+            response.StatusCode = 200;
+            response.ContentLength64 = data.Length;
+            // запрет кеширования
+            response.AddHeader("Cache-Control", "no-cache");
+            using (Stream output = response.OutputStream)
+                output.Write(data, 0, data.Length);
+        }
+
+        /// <summary>
+        /// Простейший парсер значения строки из JSON без библиотек.
+        /// Ищет "key":"value" и возвращает value.
+        /// </summary>
+        private static string ExtractJsonValue(string json, string key)
+        {
+            string pattern = "\"" + key + "\"";
+            int keyIdx = json.IndexOf(pattern);
+            if (keyIdx < 0) return null;
+
+            int colon = json.IndexOf(':', keyIdx + pattern.Length);
+            if (colon < 0) return null;
+
+            int qStart = json.IndexOf('"', colon + 1);
+            if (qStart < 0) return null;
+
+            // ищем закрывающую кавычку, пропуская экранированные
+            int qEnd = qStart + 1;
+            while (qEnd < json.Length)
+            {
+                if (json[qEnd] == '"' && json[qEnd - 1] != '\\')
+                    break;
+                qEnd++;
+            }
+
+            if (qEnd >= json.Length) return null;
+            return json.Substring(qStart + 1, qEnd - qStart - 1)
+                       .Replace("\\\"", "\"")
+                       .Replace("\\\\", "\\")
+                       .Replace("\\n", "\n");
+        }
+
+        private static string EscapeJson(string s)
+        {
+            if (s == null) return "";
+            return s.Replace("\\", "\\\\")
+                    .Replace("\"", "\\\"")
+                    .Replace("\n", "\\n")
+                    .Replace("\r", "\\r")
+                    .Replace("\t", "\\t");
+        }
+
         private static string GetContentType(string filePath)
         {
             string ext = Path.GetExtension(filePath).ToLower();
@@ -94,5 +225,14 @@ namespace Maxon_messenger
                 default:      return "application/octet-stream";
             }
         }
+    }
+
+    //САМ НАПИСАЛ!!!
+    class Message
+    {
+        public int Id;
+        public string User;
+        public string Text;
+        public string Time;
     }
 }
